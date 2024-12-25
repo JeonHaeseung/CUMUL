@@ -1,79 +1,29 @@
 import itertools
-
-from tldextract import extract
+import numpy as np
 from tqdm import tqdm
 
-from config import *
-from utils.struct import *
-from utils.utils import *
+
+DATA_PATH = "path/to/data.npz"
+OUTPUT_PATH = "path/to/feauture.npz"
 
 
-def feature(data):
-    return data
+def load_data(data_path):
+    train_data = np.load(data_path)
+    x_train, y_train = train_data['data'], train_data['labels']
+    return x_train, y_train
 
 
-def preprogress(data_path):
-    global label_set, website_list
-    print('Start progress packets...')
-    file_list = os.listdir(data_path)
-    url_list = list(map(lambda x: x.replace('___', '://', 1).replace('_', '/'), file_list))
-    website_list = list(map(lambda x: extract(x).domain, url_list))
-    label_set = get_label_set(website_list)
-    tls_instances = get_tls_instances(data_path, file_list)
-    feature = get_features(tls_instances)
-    return feature
+# CHANGE: added zero padding removal
+def trunc_zero_padding(trace):
+    start_zero_padding_index = np.asarray(np.where(trace!=0))[0][-1]
+    trace = trace[:(start_zero_padding_index+1)]
+    return trace
 
 
-@middle(file=temp_path + 'tls_instances.tmp')
-def get_tls_instances(data_path, file_list):
-    return [get_tls_instance(open(os.path.join(data_path, file)).read()) for file in tqdm(file_list)]
-
-
-@middle(file=temp_path + 'label_set.bin')
-def get_label_set(domain_list):
-    return list(set(domain_list))
-
-
-@middle(file=temp_path + 'feature.bin')
-def get_features(tls_instances):
-    print('Start extract feature...')
-    return [get_feature(instance, index) for index, instance in enumerate(tqdm(tls_instances))]
-
-
-def get_tls_instance(text):
-    instance_lines = filter(lambda x: len(x) > 0, text.rstrip().split('\n'))
-    instances = []
-    for trace in instance_lines:
-        trace = trace.rstrip().split(' ')
-        url, timestamp, *_ = trace
-        if len(timestamp) > 13:
-            timestamp = timestamp[:13]
-        if ':' in trace[2]:
-            entrynodes = '0'
-            data = trace[2:]
-        else:
-            entrynodes = trace[2]
-            data = trace[3:]
-
-        packets = []
-        for entry in data:
-            # for compatibility
-            if len(entry.split(':')) == 3:
-                packet = Packet(entry.split(':')[1], entry.split(':')[2])
-            elif len(entry.split(':')) == 2:
-                packet = Packet('', entry.split(':')[1])
-            else:
-                print("ERROR: Unkown instance format!")
-                packet = Packet('', '')
-            packets.append(packet)
-        instances.append(Instance(url, timestamp, entrynodes, packets))
-        instances.sort(key=lambda x: x.incoming_size)
-    return instances
-
-
-def get_feature(instance, instance_index):
-    classLabel = label_set.index(website_list[instance_index])
-    features = []
+# CHANGE: changed `Instance` class to npz file
+def get_feature(trace):
+    # classLabel = label_set.index(website_list[instance_index])   # CHANGE: don't need this
+    feature = []
     total = []
     cum = []
     pos = []
@@ -84,8 +34,8 @@ def get_feature(instance, instance_index):
     outCount = 0
 
     # Process trace
-    for item in itertools.islice(instance.packets):
-        packetsize = int(item.packetsize)
+    for packet in trace: # CHANGE: itertools.islice(instance.packets) -> trace
+        packetsize = np.sign(packet) * 512   # CHANGE: int(item.packetsize) -> np.sign(packet) * 512
 
         # incoming packets
         if packetsize > 0:
@@ -119,8 +69,50 @@ def get_feature(instance, instance_index):
                 neg.append(neg[-1] + abs(packetsize))
 
     # add feature
-    features.append(classLabel)
-    features.append(inCount)
-    features.append(outCount)
-    features.append(outSize)
-    features.append(inSize)
+    # feature.append(classLabel)   # CHANGE: don't need this
+    feature.append(inCount)
+    feature.append(outCount)
+    feature.append(outSize)
+    feature.append(inSize)
+
+    # CHANGE: added zero padding
+    if len(cum) < 100:
+        cum = np.concatenate((cum, np.zeros(100 - len(cum), dtype=int)))
+    else:
+        cum = cum[:100]
+
+    feature.extend(cum)    # CHANGE: added cumul feature
+    return feature
+
+
+def iter_feature(x_train, y_train):
+    features = []
+    for instance in tqdm(x_train):
+        trace = trunc_zero_padding(instance)
+        feature = get_feature(trace)
+        features.append(feature)
+    return features, y_train
+
+
+def save_npz_data(output_path, features, labels):
+    np.savez(output_path, data=features, labels=labels)
+
+
+def save_csv_data(output_path, features, label):
+    x = np.array(features)
+    y = np.array(label)
+
+    with open(output_path, "w") as file:
+        for label, features in zip(y, x):
+            line = f"{label} " + " ".join([f"{i + 1}:{value}" for i, value in enumerate(features)])
+            file.write(line + "\n")
+
+
+def main():
+    x_train, y_train = load_data(DATA_PATH)
+    features, labels = iter_feature(x_train, y_train)
+    save_npz_data(OUTPUT_PATH, features, labels)
+
+
+if __name__ == "__main__":
+    main()
